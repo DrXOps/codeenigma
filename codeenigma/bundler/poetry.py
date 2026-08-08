@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -80,15 +81,22 @@ class PoetryBundler(IBundler):
                 check=True,
             )
         except subprocess.CalledProcessError:
-            import sys
-
             subprocess.run(
                 [sys.executable, "setup.py", "build_ext", "--inplace"],
                 cwd=str(location),
                 check=True,
             )
 
-        so_file = list(location.glob("*.so"))[-1]
+        # Windows builds produce a *.pyd extension module, everywhere else
+        # it's *.so. Fork patch: upstream hardcodes "*.so" which raises
+        # IndexError on Windows (github.com/KrishnanSG/codeenigma).
+        ext_pattern = "*.pyd" if sys.platform == "win32" else "*.so"
+        matches = list(location.glob(ext_pattern))
+        if not matches:
+            raise FileNotFoundError(
+                f"No compiled extension ({ext_pattern}) found in {location}"
+            )
+        so_file = matches[-1]
         # clean up intermediate files
         shutil.rmtree(location / "build")
 

@@ -6,27 +6,36 @@ from setuptools.extension import Extension
 from Cython.Build import cythonize
 
 is_macos = sys.platform == "darwin"
+is_windows = sys.platform == "win32"
 
-extra_compile_args = [
-    "-O3",
-    "-fPIC",
-    "-fvisibility=hidden",
-    "-fdata-sections",
-    "-ffunction-sections",
-    "-flto",
-]
-
-extra_link_args = []
-
-if not is_macos:
-    # Linux-only flags
-    extra_link_args += [
-        "-Wl,--gc-sections",
-        "-Wl,--strip-all"
-    ]
+if is_windows:
+    # MSVC (cl.exe) does not understand GCC-style flags at all — passing them
+    # errors out before compilation even starts. Fork patch: upstream only
+    # branched on is_macos and left Windows with the GCC flags below, which
+    # is a second bug on top of the *.so/*.pyd one this fork also fixes.
+    extra_compile_args = ["/O2"]
+    extra_link_args = []
 else:
-    # macOS-safe alternatives (strip done manually later)
-    pass  # macOS will error on unknown linker flags
+    extra_compile_args = [
+        "-O3",
+        "-fPIC",
+        "-fvisibility=hidden",
+        "-fdata-sections",
+        "-ffunction-sections",
+        "-flto",
+    ]
+
+    extra_link_args = []
+
+    if not is_macos:
+        # Linux-only flags
+        extra_link_args += [
+            "-Wl,--gc-sections",
+            "-Wl,--strip-all"
+        ]
+    else:
+        # macOS-safe alternatives (strip done manually later)
+        pass  # macOS will error on unknown linker flags
 
 # Define extension
 ext = Extension(
@@ -58,9 +67,18 @@ setup(
     zip_safe=False,
 )
 
-try:
-    so_file = next(p for p in os.listdir('.') if p.startswith("codeenigma_runtime") and p.endswith(".so"))
-    print(f"Stripping binary: {so_file}")
-    subprocess.run(["strip", "-x", so_file], check=True)
-except Exception as e:
-    print(f"[Warning] Could not strip shared object: {e}")
+if is_windows:
+    # MSVC produces a *.pyd, not a *.so, and there is no "strip" tool on
+    # Windows by default (unless MSYS/MinGW is installed) — the binary is
+    # already stripped by the linker via /OPT:REF /OPT:ICF-equivalent
+    # defaults, so skip this step entirely rather than let it silently
+    # no-op via the broad except below (which previously masked the real
+    # *.so vs *.pyd bug in bundler/poetry.py's create_extension).
+    print("Skipping strip step on Windows (no *.so produced, no strip tool)")
+else:
+    try:
+        so_file = next(p for p in os.listdir('.') if p.startswith("codeenigma_runtime") and p.endswith(".so"))
+        print(f"Stripping binary: {so_file}")
+        subprocess.run(["strip", "-x", so_file], check=True)
+    except Exception as e:
+        print(f"[Warning] Could not strip shared object: {e}")

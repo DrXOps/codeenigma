@@ -97,7 +97,7 @@ class StandardBundler(IBundler):  # pragma: no cover
             check=True,
         )
 
-        so_file = list(location.glob("*.so"))[-1]
+        so_file = list(location.glob("*.pyd" if sys.platform == "win32" else "*.so"))[-1]
         # clean up intermediate files
         shutil.rmtree(location / "build")
 
