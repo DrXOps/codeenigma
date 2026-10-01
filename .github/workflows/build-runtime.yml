@@ -1,0 +1,144 @@
+name: Build & Publish codeenigma_runtime wheels (multi-python)
+
+# Собирает codeenigma_runtime под все поддерживаемые Python версии (3.10-3.13)
+# и публикует отдельные wheels на PyPI.
+#
+# Пользователи устанавливают pentool одной командой:
+#   uv tool install pentool
+# pip/uv автоматически выбирает wheel под свою версию Python.
+#
+# Триггеры:
+# - push тега v* (релиз)
+# - ручной запуск (workflow_dispatch)
+# - автоматически при пуше в main (собирает dev-версию без публикации)
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override (e.g. 1.2.1). Default: __version__ from codeenigma"
+        required: false
+        type: string
+      publish:
+        description: "Publish to PyPI"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-runtime:
+    name: .so py${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install build tools
+        run: |
+          pip install --quiet poetry cython setuptools
+
+      - name: Build codeenigma_runtime wheel for py${{ matrix.python }}
+        shell: bash
+        run: |
+          # CodeEnigma builds the runtime wheel internally via
+          # CythonRuntimeBuilder. We invoke it directly to produce .so
+          # for the current Python version.
+          python3 -c "
+from codeenigma.runtime.cython.builder import CythonRuntimeBuilder
+from codeenigma.bundler import PoetryBundler
+from codeenigma.extensions.base import IExtension
+from codeenigma.strategies import DefaultObfuscationStrategy
+from pathlib import Path
+import tempfile, os, sys
+
+output_dir = Path(tempfile.mkdtemp())
+strategy = DefaultObfuscationStrategy()
+bundler = PoetryBundler()
+
+builder = CythonRuntimeBuilder(strategy, bundler, extensions=[])
+builder.build(output_dir)
+
+# Locate the built wheel
+wheels = list(output_dir.glob('dist/*.whl'))
+if not wheels:
+    # wheel may be in output_dir itself
+    wheels = list(output_dir.glob('*.whl'))
+if wheels:
+    import shutil
+    os.makedirs('dist', exist_ok=True)
+    shutil.copy(wheels[0], 'dist/')
+    print(f'Copied {wheels[0]} to dist/')
+else:
+    print('ERROR: no wheel found', file=sys.stderr)
+    sys.exit(1)
+"
+          ls -la dist/
+
+      - name: Rename wheel with python tag
+        shell: bash
+        run: |
+          cd dist
+          PY_TAG="cp$(echo ${{ matrix.python }} | tr -d '.')"
+          for w in *.whl; do
+            # codeenigma_runtime-1.2.0-py3-none-any.whl → codeenigma_runtime-1.2.0-cp312-abi3-manylinux_2_17_x86_64.whl
+            NEW_NAME="${w%-py3-none-any*}-${PY_TAG}-abi3-manylinux_2_17_x86_64.whl"
+            if [ "$w" != "$NEW_NAME" ]; then
+              mv -v "$w" "$NEW_NAME"
+            fi
+          done
+          ls -la
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeenigma-runtime-py${{ matrix.python }}
+          path: dist/*.whl
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: build-runtime
+    if: >
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) ||
+      (inputs.publish == true)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -la dist/
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install twine
+          twine upload dist/*.whl --skip-existing
+
+      - name: Summary
+        run: |
+          echo "## ✅ codeenigma_runtime published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Version: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          ls dist/ | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
